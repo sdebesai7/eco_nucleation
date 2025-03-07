@@ -20,10 +20,10 @@ class EcoSim():
         self.T_tot=T_tot #this is in units of migration events
         self.m=m
         self.mu=mu
-        #self.delta_T=np.random.exponential(scale=m, size=T_tot)#generate mutation events
-        #rng = np.random.default_rng()
+        rng = np.random.default_rng()
+        self.delta_T=np.random.exponential(scale=m, size=self.T_tot)#generate mutation events
         #pick the order of arrivals
-        #self.migrants=rng.choice(S, size=T_tot, replace=True, p=mu)
+        self.migrants=rng.choice(S, size=self.T_tot, replace=True, p=mu)
         #A_ii=1 and A_ij is a randomly sampled number
         self.A=A
         self.rates=rates
@@ -34,12 +34,23 @@ class EcoSim():
         self.num_migrants=num_migrants
         self.curr_lambda=curr_lambda
 
-    def LV_dynamics(self, t, x):
+    def LV_dynamics(self, t, x, curr_lambda):
         return np.multiply(x, self.rates + np.matmul(self.A, x)) #dx_i/dt = x_i(r + Ax)_i
     
     def grow(self, ti, tf):
-        sol=scipy.integrate.solve_ivp(self.LV_dynamics, t_span=(ti, tf), y0=self.N, dense_output=True)
-        return sol.t, sol.y, sol.y[:, -1]
+        #stopping conditions
+        def lambda_reached(t, x):
+            print(np.sum(x) - self.curr_lambda)
+            return np.sum(x) - self.curr_lambda #stops when pop size == lambda
+
+        def zero_reached(t, x):
+            return np.sum(x) #stops when pop size == 0
+    
+        lambda_reached.terminal=True
+        zero_reached.terminal=True
+
+        sol=scipy.integrate.solve_ivp(self.LV_dynamics, t_span=(ti, tf), y0=self.N, dense_output=True, event=(lambda_reached, zero_reached), args=(self.curr_lambda, ), max_step=0.001)
+        return sol.t, sol.y, sol.y[:, -1], sol.t_events, sol.y_events
     
     def full_simulate(self):
         #simulate until you hit the next population size
@@ -56,37 +67,45 @@ class EcoSim():
             self.all_solns=np.vstack((self.all_solns, solns.T))
         '''
         i=0
-        while (np.sum(self.N) < self.curr_lambda and np.sum(self.N) > 0) and i < self.T_tot-1:
-            self.N_v_t[i]=self.N #2D array where A_ij=the count of species j at time i
-            delta_T=np.random.exponential(scale=self.m, size=1)
-            
-            rng = np.random.default_rng() #pick the next migrant
-            migrant=rng.choice(self.S, size=1, p=self.mu)
+        while (np.sum(self.N) < self.curr_lambda and np.sum(self.N) > 0) and i < 2*self.T_tot-1:
+            print(np.sum(self.N))
+            self.N_v_t[i%self.T_tot]=self.N #2D array where A_ij=the count of species j at time i
+            #delta_T=np.random.exponential(scale=self.m, size=1)
+            migrant = self.migrants[i%self.T_tot]
             
             self.N[migrant]=self.N[migrant]+self.num_migrants #increment migrant pop
 
-            self.T[i+1]=self.T[i]+delta_T #update time
+            self.T[(i+1)%self.T_tot]=self.T[i%self.T_tot]+self.delta_T[i%self.T_tot] #update time
 
             #growth subject to LV dynamics
-            times, solns, self.N=self.grow(self.T[i], self.T[i+1])
-            self.all_times=np.append(self.all_times, times)
+            times, solns, self.N, t_events, y_events=self.grow(self.T[i%self.T_tot], self.T[(i+1)%self.T_tot])
+            print(np.sum(self.N))
+            self.all_times=np.append(self.all_times, times) 
             self.all_solns=np.vstack((self.all_solns, solns.T))
             i=i+1
 
+            #if we do more migration events than the max, we re-generate more random numbers 
+            if i == self.T_tot:
+                rng = np.random.default_rng()
+                self.delta_T=np.random.exponential(scale=self.m, size=self.T_tot)
+                self.migrants=rng.choice(self.S, size=self.T_tot, replace=True, p=self.mu)
+
         if np.sum(self.N) < self.curr_lambda and np.sum(self.N) > 0:
             success=True
+        else:
+            success=False
 
-        return self.N_v_t, self.T, self.all_times, self.all_solns, i, success
+        return self.N_v_t, self.T, self.all_times, self.all_solns, i, success, t_events, y_events
 
 #FFS wrapper
 
 class FFS():
-    def __init__(self, lambdas, S, num_trajs, A, m, mu, rates):
+    def __init__(self, lambdas, S, num_trajs, A, m, mu, rates, T_tot):
         self.lambdas=lambdas #array of lambdas
         self.S=S #number of species
         self.num_trajs=num_trajs #number of trajectories to launch from each interface
         
-        self.T_tot=0 #max time for each simulation
+        self.T_tot=T_tot #max time for each simulation
         self.A=A #interaction matrix
         self.m=m #relative migration rates
         self.mu=mu #total migration rate
@@ -107,7 +126,7 @@ class FFS():
         for t, idx in enumerate(init_idx_choices):
             N=self.N_prev_lambda[t][0:self.S-1] #get the initial configuration
             es=EcoSim(N, self.S, self.m, self.T_tot, self.mu, self.A, self.rates, curr_lambda) #instantiate a simulation
-            N_v_t, T, all_times, all_solns, num_mig_events, success=es.full_simulate() #run the simulation
+            N_v_t, T, all_times, all_solns, num_mig_events, success, t_events, y_events=es.full_simulate() #run the simulation
             self.N_prev_lambda[t]=np.append(N_v_t[-1], np.array([N_v_t, np.sum(N_v_t), idx, num_mig_events, success])) #update previous lambda array
 
     #dump the prev lambda data
